@@ -1,0 +1,8 @@
+your_project/
+  ├─ streamlit_app.py              <-- The code below
+  ├─ requirements.txt              <-- For specifying dependencies (streamlit, pandas, openpyxl, etc.)
+  └─ data/
+       ├─ YurikaListings_7-11-2024.csv
+       ├─ YurikaBreakdowns_7-11-2024.csv
+       ├─ scdesc_7-11-2024.csv
+       └─ BackupDescriptions.csv

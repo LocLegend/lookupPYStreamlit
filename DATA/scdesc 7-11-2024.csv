@@ -1,0 +1,106 @@
+﻿import pandas as pd
+import os
+import glob
+import json
+import logging
+
+# Set up logging
+logging.basicConfig(filename='cu_sc_database.log', level=logging.INFO, format='%(asctime)s - %(message)s')
+
+# Step 1: Get the current script directory
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Step 2: Use glob to search for CSV files with expected names
+listings_file = glob.glob(os.path.join(script_dir, '*Yurika*Listings*7-11-2024.csv'))
+breakdowns_file = glob.glob(os.path.join(script_dir, '*Yurika*Breakdowns*7-11-2024.csv'))
+sc_desc_file = glob.glob(os.path.join(script_dir, '*scdesc*7-11-2024.csv'))
+backup_desc_file = glob.glob(os.path.join(script_dir, '*Backup*Descriptions*.csv'))
+
+# Step 3: Ensure we found the correct files
+if listings_file and breakdowns_file and sc_desc_file and backup_desc_file:
+    listings = pd.read_csv(listings_file[0], encoding='utf-8-sig')
+    breakdowns = pd.read_csv(breakdowns_file[0], encoding='utf-8-sig')
+    sc_desc = pd.read_csv(sc_desc_file[0], encoding='utf-8-sig')
+    backup_desc = pd.read_csv(backup_desc_file[0], encoding='utf-8-sig')
+else:
+    raise FileNotFoundError("One or more CSV files are missing. Please check the directory for the required files.")
+
+# Step 4: Clean up and preprocess data
+# Remove unnecessary columns from listings for display
+listings = listings.loc[:, ~listings.columns.str.contains('Unnamed: 8|Unnamed: 9|Unnamed: 10')]
+
+# Remove leading zeros from Stock Code in breakdowns and sc_desc
+breakdowns['STOCK CODE'] = breakdowns['STOCK CODE'].apply(lambda x: str(x).lstrip('0') if pd.notnull(x) else x)
+sc_desc['Stock Code1'] = sc_desc['Stock Code1'].apply(lambda x: str(x).lstrip('0') if pd.notnull(x) else x)
+
+# Remove "SC000" prefix from CU numbers in breakdowns
+breakdowns['CU'] = breakdowns['CU'].apply(lambda x: x[5:] if isinstance(x, str) and x.lower().startswith('sc000') else x)
+breakdowns['CHILD CU'] = breakdowns['CHILD CU'].apply(lambda x: x[5:] if isinstance(x, str) and x.lower().startswith('sc000') else x)
+
+# Dictionary to keep track of CU-SC relationships
+cu_to_sc_mapping = {}
+
+# Recursive breakdown function to handle CHILD CUs properly
+def recursive_breakdown(cu):
+    logging.info(f"Recursive Breakdown - Processing CU: {cu}")
+    if cu not in breakdowns['CU'].values:
+        return pd.DataFrame()  # No breakdown available for this CU
+    
+    breakdown_info = breakdowns[breakdowns['CU'] == cu]
+    result = pd.DataFrame()  # This will hold all the SCs
+
+    # Iterate over the breakdown rows
+    for _, row in breakdown_info.iterrows():
+        child_cu = row['CHILD CU']
+        stock_code = row['STOCK CODE']
+        
+        # If this row is a CHILD CU without a STOCK CODE, recursively break it down further
+        if pd.isna(stock_code) and pd.notna(child_cu):
+            child_breakdown = recursive_breakdown(child_cu)
+            result = pd.concat([result, child_breakdown], ignore_index=True)
+
+        # If this row has a STOCK CODE, it means it's a valid SC, add it to the result
+        elif pd.notna(stock_code):
+            result = pd.concat([result, pd.DataFrame([row])], ignore_index=True)
+    
+    return result
+
+# Function to get SC descriptions and prices from the SC description CSV
+def get_sc_details(stock_code):
+    sc_info = sc_desc[sc_desc['Stock Code1'] == str(stock_code)]
+    if not sc_info.empty:
+        return sc_info.iloc[0]['Description'], sc_info.iloc[0]['Price']
+    return "No Description Found", "No Price Found"
+
+# Build the CU-SC mapping dictionary
+for cu in listings['CU Number'].unique():
+    # Perform recursive breakdown to get all SCs associated with this CU
+    breakdown_info = recursive_breakdown(cu)
+    
+    # Build a list of SCs and their descriptions for the current CU
+    sc_list = []
+    for _, row in breakdown_info.iterrows():
+        stock_code = row.get('STOCK CODE')
+        if pd.notna(stock_code):
+            sc_description, sc_price = get_sc_details(stock_code)
+            sc_list.append({
+                'Stock Code': stock_code,
+                'Description': sc_description,
+                'Price': sc_price,
+                'Quantity': row.get('QTY', 1)  # Default quantity to 1 if not specified
+            })
+
+    # Add the CU and its SCs to the dictionary
+    cu_to_sc_mapping[cu] = {
+        'Description': listings[listings['CU Number'] == cu].iloc[0]['Description 1'],
+        'SCs': sc_list
+    }
+
+# Step 5: Save the mapping to a JSON file
+output_file_path = os.path.join(script_dir, 'cu_sc_database.json')
+with open(output_file_path, 'w', encoding='utf-8') as json_file:
+    json.dump(cu_to_sc_mapping, json_file, ensure_ascii=False, indent=4)
+
+logging.info(f"CU-SC mapping database saved to {output_file_path}")
+
+print(f"Database construction complete. File saved to {output_file_path}")
